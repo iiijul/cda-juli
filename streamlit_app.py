@@ -1,504 +1,340 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pickle
-import warnings
-warnings.filterwarnings("ignore")
+from pathlib import Path
 
-# ── Page config ──────────────────────────────────────────────────────────────
+import numpy as np
+import pandas as pd
+import streamlit as st
+
+# Jalur dataset dan model di repository.
+DATA_PATH = Path("data/02_realisasi_anggaran_klasifikasi.csv")
+MODEL_PATH = Path("model/Best_model.pkcls")
+
 st.set_page_config(
-    page_title="Realisasi Anggaran Dashboard",
-    page_icon="💰",
+    page_title="Dashboard Realisasi Anggaran",
+    page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ────────────────────────────────────────────────────────────────
-st.markdown("""
-<style>
-    [data-testid="stAppViewContainer"] { background-color: #0f1117; }
-    [data-testid="stSidebar"] { background-color: #1a1d27; }
-    .metric-card {
-        background: linear-gradient(135deg, #1e2235 0%, #252a3d 100%);
-        border: 1px solid #2e3452;
-        border-radius: 12px;
-        padding: 20px;
-        text-align: center;
-        margin-bottom: 10px;
-    }
-    .metric-card .value { font-size: 2.2rem; font-weight: 700; color: #ffffff; }
-    .metric-card .label { font-size: 0.85rem; color: #8b92a5; margin-top: 4px; }
-    .metric-card .sub { font-size: 0.8rem; margin-top: 6px; }
-    .predict-card {
-        background: linear-gradient(135deg, #1e2235 0%, #252a3d 100%);
-        border: 1px solid #2e3452;
-        border-radius: 12px;
-        padding: 24px;
-    }
-    .result-ya {
-        background: linear-gradient(135deg, #0d3b1e, #155724);
-        border: 1px solid #28a745;
-        border-radius: 12px;
-        padding: 20px;
-        text-align: center;
-    }
-    .result-tidak {
-        background: linear-gradient(135deg, #3b0d0d, #571515);
-        border: 1px solid #dc3545;
-        border-radius: 12px;
-        padding: 20px;
-        text-align: center;
-    }
-    .section-header {
-        font-size: 1.3rem;
-        font-weight: 600;
-        color: #e0e6f0;
-        margin-bottom: 16px;
-        padding-bottom: 8px;
-        border-bottom: 2px solid #2e3452;
-    }
-    .stTabs [data-baseweb="tab"] { color: #8b92a5; font-weight: 500; }
-    .stTabs [aria-selected="true"] { color: #4f8ef7 !important; }
-</style>
-""", unsafe_allow_html=True)
-
-
-# ── Data & model loaders ──────────────────────────────────────────────────────
 @st.cache_data
-def load_data():
-    df = pd.read_csv("data/02_realisasi_anggaran_klasifikasi.csv")
+def load_dataset(path: Path) -> pd.DataFrame:
+    """Memuat dataset dan menambahkan label biner untuk target."""
+    df = pd.read_csv(path)
+    df["target"] = df["realisasi_tercapai_95persen"].map({"Ya": 1, "Tidak": 0})
+    df["provinsi"] = df["provinsi"].astype("category")
+    df["jenis_belanja_utama"] = df["jenis_belanja_utama"].astype("category")
+    df["tipe_satker"] = df["tipe_satker"].astype("category")
     return df
 
-
 @st.cache_resource
-def load_model():
-    with open("models/Best_model.pkcls", "rb") as f:
-        return pickle.load(f)
+def load_model(path: Path):
+    """Memuat model Orange yang disimpan dalam file pickle."""
+    with open(path, "rb") as f:
+        model = pickle.load(f)
+    return model
 
 
-# ── Orange prediction helper ──────────────────────────────────────────────────
-def predict_orange(model, jumlah_spm, revisi_dipa, deviasi_rpd_persen,
-                   skor_ikpa, tipe_satker):
-    from Orange.data import Instance
-    tipe_map = {
-        "Dekonsentrasi":    [1, 0, 0, 0],
-        "Kantor Daerah":    [0, 1, 0, 0],
-        "Kantor Pusat":     [0, 0, 1, 0],
-        "Tugas Pembantuan": [0, 0, 0, 1],
+def get_model_feature_names(model) -> list[str]:
+    """Mengembalikan urutan fitur yang digunakan oleh model."""
+    return [attr.name for attr in model.domain.attributes]
+
+
+def build_feature_matrix(df: pd.DataFrame | pd.Series, model) -> np.ndarray:
+    """Membangun matriks fitur sesuai urutan model."""
+    if isinstance(df, pd.Series):
+        df = df.to_frame().T
+
+    feature_names = get_model_feature_names(model)
+    X = np.zeros((len(df), len(feature_names)), dtype=float)
+
+    if len(df) == 0:
+        return X
+
+    for i, name in enumerate(feature_names):
+        if name.startswith("tipe_satker=" ):
+            tipe_nama = name.split("=", 1)[1]
+            X[:, i] = (df["tipe_satker"] == tipe_nama).astype(float)
+        else:
+            X[:, i] = df[name].astype(float)
+
+    return X
+
+
+def predict_from_features(X: np.ndarray, model) -> tuple[np.ndarray, np.ndarray]:
+    """Menghasilkan prediksi kelas dan probabilitas target positif."""
+    if hasattr(model, "skl_model"):
+        predictor = model.skl_model
+    elif hasattr(model, "predict"):
+        predictor = model
+    else:
+        raise AttributeError("Model tidak memiliki atribut prediksi yang dikenal.")
+
+    prediction = predictor.predict(X).astype(int)
+    probability = predictor.predict_proba(X)[:, 1]
+    return prediction, probability
+
+
+def build_manual_input_features(model) -> tuple[np.ndarray, dict]:
+    """Membuat array fitur dan metadata dari input manual di main section."""
+    st.write("### Input Manual untuk Prediksi")
+    col_in1, col_in2 = st.columns(2)
+    
+    with col_in1:
+        jumlah_spm = st.number_input(
+            "Jumlah SPM", min_value=0, max_value=1000, value=30, step=1
+        )
+        revisi_dipa = st.number_input(
+            "Revisi DIPA", min_value=0, max_value=20, value=1, step=1
+        )
+        deviasi_rpd_persen = st.slider(
+            "Deviasi RPD (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.1
+        )
+    
+    with col_in2:
+        skor_ikpa = st.slider(
+            "Skor IKPA", min_value=0.0, max_value=100.0, value=80.0, step=0.1
+        )
+        tipe_satker = st.selectbox(
+            "Tipe Satker",
+            ["Kantor Pusat", "Kantor Daerah", "Dekonsentrasi", "Tugas Pembantuan"],
+        )
+        kementerian = st.text_input("Kementerian", value="Kementan")
+
+    input_data = {
+        "jumlah_spm": jumlah_spm,
+        "revisi_dipa": revisi_dipa,
+        "deviasi_rpd_persen": deviasi_rpd_persen,
+        "skor_ikpa": skor_ikpa,
+        "tipe_satker": tipe_satker,
+        "kementerian": kementerian,
     }
-    oh = tipe_map.get(tipe_satker, [0, 0, 0, 0])
-    vals = [jumlah_spm, revisi_dipa, deviasi_rpd_persen, skor_ikpa] + oh + [None]
-    inst = Instance(model.domain, vals)
-    pred_idx = model(inst, model.Value)
-    proba = model(inst, model.Probs)
-    label = model.domain.class_var.values[int(pred_idx)]
-    return label, float(proba[0]), float(proba[1])   # label, p_tidak, p_ya
+
+    feature_names = get_model_feature_names(model)
+    row = np.zeros((1, len(feature_names)), dtype=float)
+
+    for i, name in enumerate(feature_names):
+        if name.startswith("tipe_satker="):
+            tipe_nama = name.split("=", 1)[1]
+            row[0, i] = 1.0 if tipe_satker == tipe_nama else 0.0
+        else:
+            row[0, i] = float(input_data[name])
+
+    return row, input_data
 
 
-# ── Load assets ───────────────────────────────────────────────────────────────
-df = load_data()
-model = load_model()
-
-COLOR_YA    = "#28a745"
-COLOR_TIDAK = "#dc3545"
-COLOR_BLUE  = "#4f8ef7"
-PLOTLY_THEME = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color="#c8cfe0", family="Inter, sans-serif"),
-    margin=dict(l=20, r=20, t=40, b=20),
-)
-
-# ── Sidebar filters ───────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("## 🔍 Filter Data")
-    st.markdown("---")
-
-    kementerian_list = ["Semua"] + sorted(df["nama_kementerian"].unique())
-    sel_kementerian  = st.multiselect("Kementerian", kementerian_list[1:],
-                                      default=kementerian_list[1:])
-
-    provinsi_list = ["Semua"] + sorted(df["provinsi"].unique())
-    sel_provinsi  = st.multiselect("Provinsi", provinsi_list[1:],
-                                   default=provinsi_list[1:])
-
-    tipe_list = ["Semua"] + sorted(df["tipe_satker"].unique())
-    sel_tipe  = st.multiselect("Tipe Satker", tipe_list[1:],
-                               default=tipe_list[1:])
-
-    jenis_list = ["Semua"] + sorted(df["jenis_belanja_utama"].unique())
-    sel_jenis  = st.multiselect("Jenis Belanja", jenis_list[1:],
-                                default=jenis_list[1:])
-
-    st.markdown("---")
-    pagu_range = st.slider(
-        "Pagu (Miliar Rp)",
-        float(df["pagu_miliar"].min()),
-        float(df["pagu_miliar"].max()),
-        (float(df["pagu_miliar"].min()), float(df["pagu_miliar"].max())),
-        step=1.0,
+def main() -> None:
+    st.title("Dashboard Realisasi Anggaran dan Prediksi 95%")
+    st.markdown(
+        "Dashboard ini menampilkan data anggaran, evaluasi model, dan prediksi interaktif untuk target `realisasi_tercapai_95persen`."
     )
 
-# ── Apply filters ─────────────────────────────────────────────────────────────
-fdf = df.copy()
-if sel_kementerian:
-    fdf = fdf[fdf["nama_kementerian"].isin(sel_kementerian)]
-if sel_provinsi:
-    fdf = fdf[fdf["provinsi"].isin(sel_provinsi)]
-if sel_tipe:
-    fdf = fdf[fdf["tipe_satker"].isin(sel_tipe)]
-if sel_jenis:
-    fdf = fdf[fdf["jenis_belanja_utama"].isin(sel_jenis)]
-fdf = fdf[(fdf["pagu_miliar"] >= pagu_range[0]) & (fdf["pagu_miliar"] <= pagu_range[1])]
+    try:
+        df = load_dataset(DATA_PATH)
+    except FileNotFoundError:
+        st.error(f"File data tidak ditemukan: {DATA_PATH}")
+        return
+    except Exception as exc:
+        st.error(f"Gagal memuat data: {exc}")
+        return
 
-# ── Header ────────────────────────────────────────────────────────────────────
-st.markdown("""
-<h1 style='font-size:2rem; font-weight:700; color:#e0e6f0; margin-bottom:4px'>
-💰 Dashboard Realisasi Anggaran
-</h1>
-<p style='color:#8b92a5; margin-bottom:24px'>
-Analisis & Prediksi Ketercapaian Realisasi Anggaran ≥ 95%
-</p>
-""", unsafe_allow_html=True)
+    try:
+        model = load_model(MODEL_PATH)
+    except FileNotFoundError:
+        st.error(f"File model tidak ditemukan: {MODEL_PATH}")
+        return
+    except Exception as exc:
+        st.error(f"Gagal memuat model: {exc}")
+        return
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📊 Overview", "🔎 Analisis Detail", "🤖 Prediksi"])
+    if df.empty:
+        st.warning("Dataset kosong. Pastikan file CSV berisi data.")
+        return
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 1 — OVERVIEW
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab1:
-    total     = len(fdf)
-    ya_count  = (fdf["realisasi_tercapai_95persen"] == "Ya").sum()
-    tdk_count = total - ya_count
-    pct_ya    = ya_count / total * 100 if total else 0
-    avg_tw3   = fdf["realisasi_tw3_persen"].mean()
-    avg_ikpa  = fdf["skor_ikpa"].mean()
+    X_all = build_feature_matrix(df, model)
+    prediction_all, probability_all = predict_from_features(X_all, model)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    metrics = [
-        (c1, str(total),           "Total Satker",               None),
-        (c2, str(ya_count),        "Tercapai ≥95%",              f"<span style='color:{COLOR_YA}'>✔ {pct_ya:.1f}%</span>"),
-        (c3, str(tdk_count),       "Belum Tercapai",             f"<span style='color:{COLOR_TIDAK}'>✖ {100-pct_ya:.1f}%</span>"),
-        (c4, f"{avg_tw3:.1f}%",    "Avg Realisasi TW3",          None),
-        (c5, f"{avg_ikpa:.1f}",    "Avg Skor IKPA",              None),
+    df = df.copy()
+    df["prediksi"] = np.where(prediction_all == 1, "Ya,", "Tidak,")
+    df["prediksi_proba"] = probability_all
+
+    st.sidebar.header("Filter Data")
+    provinsi_options = sorted(df["provinsi"].cat.categories)
+    tipe_options = sorted(df["tipe_satker"].cat.categories)
+    jenis_belanja_options = sorted(df["jenis_belanja_utama"].cat.categories)
+
+    provinsi_filter = st.sidebar.multiselect(
+        "Provinsi",
+        provinsi_options,
+        default=provinsi_options,
+    )
+    tipe_satker_filter = st.sidebar.multiselect(
+        "Tipe Satker",
+        tipe_options,
+        default=tipe_options,
+    )
+    jenis_belanja_filter = st.sidebar.multiselect(
+        "Jenis Belanja Utama",
+        jenis_belanja_options,
+        default=jenis_belanja_options,
+    )
+
+    filtered_df = df[
+        df["provinsi"].isin(provinsi_filter)
+        & df["tipe_satker"].isin(tipe_satker_filter)
+        & df["jenis_belanja_utama"].isin(jenis_belanja_filter)
     ]
-    for col, val, lbl, sub in metrics:
-        with col:
-            sub_html = f"<div class='sub'>{sub}</div>" if sub else ""
-            st.markdown(f"""
-            <div class='metric-card'>
-                <div class='value'>{val}</div>
-                <div class='label'>{lbl}</div>
-                {sub_html}
-            </div>""", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
-    col_l, col_r = st.columns([1, 1])
+    if filtered_df.empty:
+        st.warning("Filter menghasilkan 0 baris. Kurangi atau ubah filter untuk melihat data.")
+        return
 
-    # Donut
-    with col_l:
-        st.markdown("<div class='section-header'>Distribusi Ketercapaian</div>", unsafe_allow_html=True)
-        fig_donut = go.Figure(go.Pie(
-            labels=["Tidak Tercapai", "Tercapai ≥95%"],
-            values=[tdk_count, ya_count],
-            hole=0.65,
-            marker_colors=[COLOR_TIDAK, COLOR_YA],
-            textinfo="percent+label",
-            textfont=dict(size=13),
-        ))
-        fig_donut.add_annotation(text=f"<b>{pct_ya:.1f}%</b><br>Tercapai",
-                                  showarrow=False, font=dict(size=16, color="#fff"),
-                                  x=0.5, y=0.5)
-        fig_donut.update_layout(**PLOTLY_THEME, height=320, showlegend=False)
-        st.plotly_chart(fig_donut, use_container_width=True)
+    st.subheader("Ringkasan Dataset")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Jumlah Satker", len(filtered_df))
+    col2.metric(
+        "Target Tercapai 95%",
+        f"{filtered_df['target'].mean() * 100:.1f}%",
+    )
+    col3.metric("Rata-rata Skor IKPA", f"{filtered_df['skor_ikpa'].mean():.2f}")
+    col4.metric("Rata-rata Deviasi RPD", f"{filtered_df['deviasi_rpd_persen'].mean():.2f}%")
 
-    # Realisasi per TW
-    with col_r:
-        st.markdown("<div class='section-header'>Tren Realisasi per Triwulan</div>", unsafe_allow_html=True)
-        tw_means = {
-            "TW1": fdf["realisasi_tw1_persen"].mean(),
-            "TW2": fdf["realisasi_tw2_persen"].mean(),
-            "TW3": fdf["realisasi_tw3_persen"].mean(),
+    with st.expander("📊 Statistik Deskriptif Fitur Numerik"):
+        st.dataframe(
+            filtered_df[
+                [
+                    "pagu_miliar",
+                    "jumlah_pegawai",
+                    "jumlah_spm",
+                    "revisi_dipa",
+                    "realisasi_tw1_persen",
+                    "realisasi_tw2_persen",
+                    "realisasi_tw3_persen",
+                    "deviasi_rpd_persen",
+                    "skor_ikpa",
+                ]
+            ].describe().T
+        )
+
+    st.subheader("Distribusi Target dan Probabilitas Prediksi")
+    target_share = filtered_df.groupby("provinsi")["target"].mean()
+    pred_share = filtered_df.groupby("provinsi")["prediksi_proba"].mean()
+
+    chart_df = pd.DataFrame(
+        {
+            "Target 95% Tercapai": target_share,
+            "Probabilitas Prediksi": pred_share,
         }
-        fig_tw = go.Figure()
-        fig_tw.add_trace(go.Scatter(
-            x=list(tw_means.keys()), y=list(tw_means.values()),
-            mode="lines+markers+text",
-            line=dict(color=COLOR_BLUE, width=3),
-            marker=dict(size=10, color=COLOR_BLUE),
-            text=[f"{v:.1f}%" for v in tw_means.values()],
-            textposition="top center",
-            fill="tozeroy",
-            fillcolor="rgba(79,142,247,0.15)",
-        ))
-        fig_tw.add_hline(y=95, line_dash="dot", line_color="#f0ad4e",
-                         annotation_text="Target 95%", annotation_font_color="#f0ad4e")
-        fig_tw.update_layout(**PLOTLY_THEME, height=320, yaxis_range=[0, 105],
-                              yaxis_title="Rata-rata (%)")
-        st.plotly_chart(fig_tw, use_container_width=True)
+    ).fillna(0)
+    st.bar_chart(chart_df)
 
-    # By Kementerian
-    st.markdown("<div class='section-header'>Ketercapaian per Kementerian</div>", unsafe_allow_html=True)
-    grp = fdf.groupby(["nama_kementerian", "realisasi_tercapai_95persen"]).size().unstack(fill_value=0)
-    grp.columns = [c for c in grp.columns]
-    grp_pct = grp.div(grp.sum(axis=1), axis=0) * 100
-    grp_pct = grp_pct.reset_index().sort_values("Ya", ascending=True) if "Ya" in grp_pct.columns else grp_pct.reset_index()
+    if st.checkbox("Tampilkan data mentah yang difilter", value=True):
+        st.dataframe(filtered_df.drop(columns=["target"], errors="ignore"))
 
-    fig_bar = go.Figure()
-    if "Tidak" in grp_pct.columns:
-        fig_bar.add_trace(go.Bar(name="Tidak Tercapai", x=grp_pct["Tidak"],
-                                  y=grp_pct["nama_kementerian"], orientation="h",
-                                  marker_color=COLOR_TIDAK, text=grp_pct["Tidak"].round(1).astype(str)+"%",
-                                  textposition="inside"))
-    if "Ya" in grp_pct.columns:
-        fig_bar.add_trace(go.Bar(name="Tercapai ≥95%", x=grp_pct["Ya"],
-                                  y=grp_pct["nama_kementerian"], orientation="h",
-                                  marker_color=COLOR_YA, text=grp_pct["Ya"].round(1).astype(str)+"%",
-                                  textposition="inside"))
-    fig_bar.update_layout(**PLOTLY_THEME, barmode="stack", height=380,
-                           xaxis_title="Persentase (%)", legend=dict(orientation="h", y=1.08))
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.subheader("Evaluasi Model pada Seluruh Dataset")
+    accuracy = (prediction_all == df["target"]).mean()
+    st.write(f"Akurasi model terhadap seluruh dataset: **{accuracy * 100:.2f}%**")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — ANALISIS DETAIL
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab2:
-    col_l, col_r = st.columns(2)
+    coef_values = getattr(model, "skl_model", model).coef_[0]
+    coef_df = pd.DataFrame(
+        {
+            "Fitur": get_model_feature_names(model),
+            "Koefisien": coef_values,
+            "Kekuatan": np.abs(coef_values),
+        }
+    ).sort_values(by="Kekuatan", ascending=False)
 
-    with col_l:
-        # Box: skor IKPA by hasil
-        st.markdown("<div class='section-header'>Skor IKPA vs Ketercapaian</div>", unsafe_allow_html=True)
-        fig_box = px.box(fdf, x="realisasi_tercapai_95persen", y="skor_ikpa",
-                         color="realisasi_tercapai_95persen",
-                         color_discrete_map={"Ya": COLOR_YA, "Tidak": COLOR_TIDAK},
-                         points="outliers", labels={"skor_ikpa": "Skor IKPA",
-                         "realisasi_tercapai_95persen": ""})
-        fig_box.update_layout(**PLOTLY_THEME, showlegend=False, height=340)
-        st.plotly_chart(fig_box, use_container_width=True)
+    st.subheader("Interpretasi Model")
+    st.write(
+        "Koefisien regresi logistik menunjukkan arah pengaruh fitur terhadap peluang target `Ya` (tercapai 95%)."
+    )
+    st.dataframe(coef_df.reset_index(drop=True))
+    st.bar_chart(coef_df.set_index("Fitur")["Koefisien"])
 
-        # Deviasi RPD
-        st.markdown("<div class='section-header'>Deviasi RPD vs Ketercapaian</div>", unsafe_allow_html=True)
-        fig_dev = px.box(fdf, x="realisasi_tercapai_95persen", y="deviasi_rpd_persen",
-                         color="realisasi_tercapai_95persen",
-                         color_discrete_map={"Ya": COLOR_YA, "Tidak": COLOR_TIDAK},
-                         points="outliers", labels={"deviasi_rpd_persen": "Deviasi RPD (%)",
-                         "realisasi_tercapai_95persen": ""})
-        fig_dev.update_layout(**PLOTLY_THEME, showlegend=False, height=340)
-        st.plotly_chart(fig_dev, use_container_width=True)
+    st.subheader("Prediksi Interaktif")
+    input_mode = st.radio("Pilih sumber input:", ["Pilih baris data", "Input manual"])
 
-    with col_r:
-        # Scatter: TW3 vs IKPA
-        st.markdown("<div class='section-header'>Realisasi TW3 vs Skor IKPA</div>", unsafe_allow_html=True)
-        fig_sc = px.scatter(fdf, x="skor_ikpa", y="realisasi_tw3_persen",
-                            color="realisasi_tercapai_95persen",
-                            color_discrete_map={"Ya": COLOR_YA, "Tidak": COLOR_TIDAK},
-                            hover_data=["nama_kementerian", "provinsi", "tipe_satker"],
-                            labels={"skor_ikpa": "Skor IKPA",
-                                    "realisasi_tw3_persen": "Realisasi TW3 (%)",
-                                    "realisasi_tercapai_95persen": ""},
-                            opacity=0.75)
-        fig_sc.add_hline(y=95, line_dash="dot", line_color="#f0ad4e",
-                         annotation_text="Target 95%")
-        fig_sc.update_layout(**PLOTLY_THEME, height=340,
-                              legend=dict(orientation="h", y=1.08))
-        st.plotly_chart(fig_sc, use_container_width=True)
-
-        # By Tipe Satker
-        st.markdown("<div class='section-header'>Ketercapaian per Tipe Satker</div>", unsafe_allow_html=True)
-        grp_t = fdf.groupby(["tipe_satker", "realisasi_tercapai_95persen"]).size().unstack(fill_value=0)
-        grp_t_pct = grp_t.div(grp_t.sum(axis=1), axis=0) * 100
-        grp_t_pct = grp_t_pct.reset_index()
-        fig_tipe = go.Figure()
-        if "Tidak" in grp_t_pct.columns:
-            fig_tipe.add_trace(go.Bar(name="Tidak", y=grp_t_pct["tipe_satker"],
-                                       x=grp_t_pct["Tidak"], orientation="h",
-                                       marker_color=COLOR_TIDAK))
-        if "Ya" in grp_t_pct.columns:
-            fig_tipe.add_trace(go.Bar(name="Ya", y=grp_t_pct["tipe_satker"],
-                                       x=grp_t_pct["Ya"], orientation="h",
-                                       marker_color=COLOR_YA))
-        fig_tipe.update_layout(**PLOTLY_THEME, barmode="stack", height=340,
-                                xaxis_title="Persentase (%)", legend=dict(orientation="h", y=1.08))
-        st.plotly_chart(fig_tipe, use_container_width=True)
-
-    # Heatmap: Provinsi x Kementerian (avg TW3)
-    st.markdown("<div class='section-header'>Rata-rata Realisasi TW3 per Provinsi & Jenis Belanja</div>", unsafe_allow_html=True)
-    pivot = fdf.pivot_table(values="realisasi_tw3_persen",
-                             index="provinsi", columns="jenis_belanja_utama",
-                             aggfunc="mean")
-    fig_heat = px.imshow(pivot, color_continuous_scale="RdYlGn",
-                          zmin=0, zmax=100, aspect="auto",
-                          labels=dict(color="Avg TW3 (%)"))
-    fig_heat.update_layout(**PLOTLY_THEME, height=450)
-    st.plotly_chart(fig_heat, use_container_width=True)
-
-    # Raw table
-    with st.expander("📋 Lihat Data Mentah", expanded=False):
-        display_cols = ["kode_satker", "nama_kementerian", "provinsi", "tipe_satker",
-                        "jenis_belanja_utama", "pagu_miliar", "skor_ikpa",
-                        "realisasi_tw3_persen", "realisasi_tercapai_95persen"]
-        st.dataframe(fdf[display_cols].reset_index(drop=True),
-                     use_container_width=True, height=350)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — PREDIKSI
-# ═══════════════════════════════════════════════════════════════════════════════
-with tab3:
-    st.markdown("""
-    <p style='color:#8b92a5; margin-bottom:24px'>
-    Model: <b style='color:#4f8ef7'>Logistic Regression</b> (Orange3) — 
-    fitur: jumlah_spm, revisi_dipa, deviasi_rpd_persen, skor_ikpa, tipe_satker
-    </p>""", unsafe_allow_html=True)
-
-    col_form, col_result = st.columns([1, 1], gap="large")
-
-    with col_form:
-        st.markdown("<div class='section-header'>Input Parameter Satker</div>", unsafe_allow_html=True)
-
-        tipe_satker_input = st.selectbox(
-            "Tipe Satker", ["Dekonsentrasi", "Kantor Daerah", "Kantor Pusat", "Tugas Pembantuan"]
+    if input_mode == "Pilih baris data":
+        st.write("### Filter Pilih Baris")
+        row_col1, row_col2, row_col3, row_col4 = st.columns(4)
+        provinsi_pred = row_col1.selectbox(
+            "Provinsi untuk filter",
+            ["Semua"] + provinsi_options,
+            index=0,
         )
-        jumlah_spm_input = st.number_input(
-            "Jumlah SPM", min_value=0, max_value=500, value=80,
-            help="Jumlah Surat Perintah Membayar yang diterbitkan"
+        tipe_pred = row_col2.selectbox(
+            "Tipe Satker untuk filter",
+            ["Semua"] + tipe_options,
+            index=0,
         )
-        revisi_dipa_input = st.number_input(
-            "Revisi DIPA", min_value=0, max_value=20, value=2,
-            help="Jumlah revisi DIPA dalam tahun berjalan"
+        jenis_pred = row_col3.selectbox(
+            "Jenis Belanja untuk filter",
+            ["Semua"] + jenis_belanja_options,
+            index=0,
         )
-        deviasi_rpd_input = st.number_input(
-            "Deviasi RPD (%)", min_value=0.0, max_value=30.0, value=10.0, step=0.1,
-            help="Deviasi antara rencana dan realisasi penyerapan (%)"
+        kementerian_pred = row_col4.text_input("Kementerian untuk filter", "")
+
+        sample_df = filtered_df.copy()
+        if provinsi_pred != "Semua":
+            sample_df = sample_df[sample_df["provinsi"] == provinsi_pred]
+        if tipe_pred != "Semua":
+            sample_df = sample_df[sample_df["tipe_satker"] == tipe_pred]
+        if jenis_pred != "Semua":
+            sample_df = sample_df[sample_df["jenis_belanja_utama"] == jenis_pred]
+        if kementerian_pred.strip():
+            sample_df = sample_df[sample_df["nama_kementerian"].str.contains(kementerian_pred, case=False, na=False)]
+
+        if sample_df.empty:
+            st.warning("Filter prediksi tidak menghasilkan baris. Ubah kriteria filter.")
+            return
+
+        index = st.selectbox(
+            "Pilih baris data:",
+            sample_df.index,
+            format_func=lambda i: f"{i} | {sample_df.loc[i,'nama_kementerian']} | {sample_df.loc[i,'provinsi']} | {sample_df.loc[i,'tipe_satker']}"
         )
-        skor_ikpa_input = st.number_input(
-            "Skor IKPA", min_value=70.0, max_value=100.0, value=85.0, step=0.1,
-            help="Indikator Kinerja Pelaksanaan Anggaran (0-100)"
-        )
+        sample_row = sample_df.loc[index]
+        st.write("### Data Terpilih")
+        st.write(sample_row.to_frame().T)
+        X_sample = build_feature_matrix(sample_row, model)
+        pred, prob = predict_from_features(X_sample, model)
+    else:
+        X_sample, input_data = build_manual_input_features(model)
+        pred, prob = predict_from_features(X_sample, model)
 
-        predict_btn = st.button("🔮 Prediksi Sekarang", type="primary", use_container_width=True)
+    if isinstance(pred, np.ndarray):
+        pred = int(pred[0])
+    if isinstance(prob, np.ndarray):
+        prob = float(prob[0])
 
-    with col_result:
-        st.markdown("<div class='section-header'>Hasil Prediksi</div>", unsafe_allow_html=True)
+    st.divider()
+    st.write("## Hasil Prediksi")
+    
+    result_col1, result_col2 = st.columns([2, 3])
+    
+    with result_col1:
+        result_text = "✅ YA" if pred == 1 else "❌ TIDAK"
+        result_color = "green" if pred == 1 else "red"
+        st.markdown(f"### <span style='color:{result_color};font-size:2.5em;'>{result_text}</span>", unsafe_allow_html=True)
+        st.markdown(f"**Target tercapai 95%:** {'Kemungkinan Besar' if pred == 1 else 'Kemungkinan Kecil'}")
+    
+    with result_col2:
+        st.write("### Tingkat Kepercayaan")
+        prob_percentage = prob * 100
+        st.metric(label="Probabilitas Positif", value=f"{prob_percentage:.1f}%")
+        
+        gauge_value = prob_percentage / 100
+        
+        st.progress(gauge_value, text=f"{prob_percentage:.1f}%")
 
-        if predict_btn:
-            label, p_tidak, p_ya = predict_orange(
-                model, jumlah_spm_input, revisi_dipa_input,
-                deviasi_rpd_input, skor_ikpa_input, tipe_satker_input
-            )
-            is_ya = (label == "Ya")
-            card_cls = "result-ya" if is_ya else "result-tidak"
-            icon      = "✅" if is_ya else "❌"
-            txt_col   = COLOR_YA if is_ya else COLOR_TIDAK
-            verdict   = "TERCAPAI ≥ 95%" if is_ya else "BELUM TERCAPAI"
+    st.markdown(
+        "---\n"
+        "### Penjelasan Kode\n"
+        "1. `load_dataset`: memuat CSV dan menyiapkan label target biner.\n"
+        "2. `load_model`: memuat model Orange dari `model/Best_model.pkcls`.\n"
+        "3. `build_feature_matrix`: membuat fitur numerik dan biner tipe_satker agar cocok dengan model.\n"
+        "4. `predict_from_features`: memakai `model.skl_model` internal untuk menghasilkan prediksi.\n"
+        "5. Bagian utama: filter, ringkasan statistik, visualisasi, evaluasi model, dan prediksi interaktif.\n"
+    )
 
-            st.markdown(f"""
-            <div class='{card_cls}'>
-                <div style='font-size:3rem'>{icon}</div>
-                <div style='font-size:1.5rem; font-weight:700; color:{txt_col}; margin-top:8px'>{verdict}</div>
-                <div style='color:#c8cfe0; margin-top:6px; font-size:0.9rem'>
-                    Prediksi realisasi anggaran akhir tahun
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
 
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            # Probability gauge
-            fig_gauge = go.Figure(go.Indicator(
-                mode="gauge+number",
-                value=p_ya * 100,
-                title={"text": "Probabilitas Tercapai", "font": {"color": "#c8cfe0", "size": 14}},
-                number={"suffix": "%", "font": {"color": "#ffffff", "size": 28}},
-                gauge={
-                    "axis": {"range": [0, 100], "tickcolor": "#8b92a5"},
-                    "bar": {"color": COLOR_YA if is_ya else COLOR_TIDAK},
-                    "bgcolor": "#1e2235",
-                    "bordercolor": "#2e3452",
-                    "steps": [
-                        {"range": [0, 50],  "color": "rgba(220,53,69,0.2)"},
-                        {"range": [50, 75], "color": "rgba(240,173,78,0.2)"},
-                        {"range": [75, 100],"color": "rgba(40,167,69,0.2)"},
-                    ],
-                    "threshold": {"line": {"color": "#f0ad4e", "width": 3},
-                                  "thickness": 0.8, "value": 50},
-                },
-            ))
-            fig_gauge.update_layout(**PLOTLY_THEME, height=260)
-            st.plotly_chart(fig_gauge, use_container_width=True)
-
-            # Prob bar
-            fig_prob = go.Figure(go.Bar(
-                x=["Tidak Tercapai", "Tercapai ≥95%"],
-                y=[p_tidak * 100, p_ya * 100],
-                marker_color=[COLOR_TIDAK, COLOR_YA],
-                text=[f"{p_tidak*100:.1f}%", f"{p_ya*100:.1f}%"],
-                textposition="outside",
-                textfont=dict(size=14),
-            ))
-            fig_prob.update_layout(**PLOTLY_THEME, height=220, yaxis_range=[0, 115],
-                                    yaxis_title="Probabilitas (%)", showlegend=False)
-            st.plotly_chart(fig_prob, use_container_width=True)
-
-        else:
-            st.markdown("""
-            <div style='text-align:center; padding:60px 20px; color:#8b92a5'>
-                <div style='font-size:3rem; margin-bottom:16px'>🤖</div>
-                <div style='font-size:1rem'>Isi parameter di kiri dan klik<br>
-                <b style='color:#4f8ef7'>Prediksi Sekarang</b></div>
-            </div>""", unsafe_allow_html=True)
-
-    # ── Batch prediction ──────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("<div class='section-header'>🗂️ Prediksi Batch dari Dataset</div>", unsafe_allow_html=True)
-    st.markdown("<p style='color:#8b92a5; font-size:0.9rem'>Jalankan prediksi model pada seluruh data yang difilter dan bandingkan dengan label aktual.</p>", unsafe_allow_html=True)
-
-    if st.button("▶ Jalankan Prediksi Batch", use_container_width=False):
-        from Orange.data import Instance
-
-        results = []
-        for _, row in fdf.iterrows():
-            lbl, p_t, p_y = predict_orange(
-                model, row["jumlah_spm"], row["revisi_dipa"],
-                row["deviasi_rpd_persen"], row["skor_ikpa"], row["tipe_satker"]
-            )
-            results.append({"Prediksi": lbl, "Prob_Ya": round(p_y * 100, 1),
-                             "Prob_Tidak": round(p_t * 100, 1)})
-
-        res_df = pd.concat([
-            fdf[["kode_satker", "nama_kementerian", "tipe_satker",
-                  "skor_ikpa", "deviasi_rpd_persen",
-                  "realisasi_tercapai_95persen"]].reset_index(drop=True),
-            pd.DataFrame(results)
-        ], axis=1)
-
-        correct = (res_df["realisasi_tercapai_95persen"] == res_df["Prediksi"]).sum()
-        acc = correct / len(res_df) * 100
-
-        mc1, mc2, mc3 = st.columns(3)
-        for col, val, lbl in [
-            (mc1, str(len(res_df)), "Total Diprediksi"),
-            (mc2, str(correct),     "Prediksi Benar"),
-            (mc3, f"{acc:.1f}%",    "Akurasi"),
-        ]:
-            with col:
-                st.markdown(f"""
-                <div class='metric-card'>
-                    <div class='value'>{val}</div>
-                    <div class='label'>{lbl}</div>
-                </div>""", unsafe_allow_html=True)
-
-        # Confusion visual
-        from sklearn.metrics import confusion_matrix
-        cm = confusion_matrix(res_df["realisasi_tercapai_95persen"], res_df["Prediksi"],
-                              labels=["Tidak", "Ya"])
-        fig_cm = px.imshow(cm, text_auto=True, x=["Pred: Tidak", "Pred: Ya"],
-                           y=["Aktual: Tidak", "Aktual: Ya"],
-                           color_continuous_scale="Blues", aspect="auto")
-        fig_cm.update_layout(**PLOTLY_THEME, title="Confusion Matrix", height=300)
-        st.plotly_chart(fig_cm, use_container_width=True)
-
-        st.dataframe(res_df.reset_index(drop=True), use_container_width=True, height=320)
+if __name__ == "__main__":
+    main()

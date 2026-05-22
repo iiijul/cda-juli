@@ -38,19 +38,13 @@ def get_model_feature_names(model) -> list[str]:
     return [attr.name for attr in model.domain.attributes]
 
 
-def build_feature_matrix(df: pd.DataFrame | pd.Series, model) -> np.ndarray:
+def build_feature_matrix(df: pd.DataFrame, model) -> np.ndarray:
     """Membangun matriks fitur sesuai urutan model."""
-    if isinstance(df, pd.Series):
-        df = df.to_frame().T
-
     feature_names = get_model_feature_names(model)
     X = np.zeros((len(df), len(feature_names)), dtype=float)
 
-    if len(df) == 0:
-        return X
-
     for i, name in enumerate(feature_names):
-        if name.startswith("tipe_satker=" ):
+        if name.startswith("tipe_satker="):
             tipe_nama = name.split("=", 1)[1]
             X[:, i] = (df["tipe_satker"] == tipe_nama).astype(float)
         else:
@@ -61,15 +55,8 @@ def build_feature_matrix(df: pd.DataFrame | pd.Series, model) -> np.ndarray:
 
 def predict_from_features(X: np.ndarray, model) -> tuple[np.ndarray, np.ndarray]:
     """Menghasilkan prediksi kelas dan probabilitas target positif."""
-    if hasattr(model, "skl_model"):
-        predictor = model.skl_model
-    elif hasattr(model, "predict"):
-        predictor = model
-    else:
-        raise AttributeError("Model tidak memiliki atribut prediksi yang dikenal.")
-
-    prediction = predictor.predict(X).astype(int)
-    probability = predictor.predict_proba(X)[:, 1]
+    prediction = model.skl_model.predict(X).astype(int)
+    probability = model.skl_model.predict_proba(X)[:, 1]
     return prediction, probability
 
 
@@ -79,20 +66,19 @@ def build_manual_input(model) -> tuple[np.ndarray, dict]:
     jumlah_spm = st.sidebar.number_input(
         "Jumlah SPM", min_value=0, max_value=1000, value=30, step=1
     )
-    skor_ikpa = st.sidebar.slider(
-        "Skor IKPA", min_value=0.0, max_value=100.0, value=80.0, step=0.1
-    )
     revisi_dipa = st.sidebar.number_input(
         "Revisi DIPA", min_value=0, max_value=20, value=1, step=1
     )
     deviasi_rpd_persen = st.sidebar.slider(
         "Deviasi RPD (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.1
     )
+    skor_ikpa = st.sidebar.slider(
+        "Skor IKPA", min_value=0.0, max_value=100.0, value=80.0, step=0.1
+    )
     tipe_satker = st.sidebar.selectbox(
         "Tipe Satker",
         ["Kantor Pusat", "Kantor Daerah", "Dekonsentrasi", "Tugas Pembantuan"],
     )
-    kementerian = st.sidebar.text_input("Kementerian", value="Kementan")
 
     input_data = {
         "jumlah_spm": jumlah_spm,
@@ -100,7 +86,6 @@ def build_manual_input(model) -> tuple[np.ndarray, dict]:
         "deviasi_rpd_persen": deviasi_rpd_persen,
         "skor_ikpa": skor_ikpa,
         "tipe_satker": tipe_satker,
-        "kementerian": kementerian,
     }
 
     feature_names = get_model_feature_names(model)
@@ -122,27 +107,8 @@ def main() -> None:
         "Dashboard ini menampilkan data anggaran, evaluasi model, dan prediksi interaktif untuk target `realisasi_tercapai_95persen`."
     )
 
-    try:
-        df = load_dataset(DATA_PATH)
-    except FileNotFoundError:
-        st.error(f"File data tidak ditemukan: {DATA_PATH}")
-        return
-    except Exception as exc:
-        st.error(f"Gagal memuat data: {exc}")
-        return
-
-    try:
-        model = load_model(MODEL_PATH)
-    except FileNotFoundError:
-        st.error(f"File model tidak ditemukan: {MODEL_PATH}")
-        return
-    except Exception as exc:
-        st.error(f"Gagal memuat model: {exc}")
-        return
-
-    if df.empty:
-        st.warning("Dataset kosong. Pastikan file CSV berisi data.")
-        return
+    df = load_dataset(DATA_PATH)
+    model = load_model(MODEL_PATH)
 
     X_all = build_feature_matrix(df, model)
     prediction_all, probability_all = predict_from_features(X_all, model)
@@ -152,24 +118,20 @@ def main() -> None:
     df["prediksi_proba"] = probability_all
 
     st.sidebar.header("Filter Data")
-    provinsi_options = sorted(df["provinsi"].cat.categories)
-    tipe_options = sorted(df["tipe_satker"].cat.categories)
-    jenis_belanja_options = sorted(df["jenis_belanja_utama"].cat.categories)
-
     provinsi_filter = st.sidebar.multiselect(
         "Provinsi",
-        provinsi_options,
-        default=provinsi_options,
+        sorted(df["provinsi"].cat.categories),
+        default=list(df["provinsi"].cat.categories),
     )
     tipe_satker_filter = st.sidebar.multiselect(
         "Tipe Satker",
-        tipe_options,
-        default=tipe_options,
+        sorted(df["tipe_satker"].cat.categories),
+        default=list(df["tipe_satker"].cat.categories),
     )
     jenis_belanja_filter = st.sidebar.multiselect(
         "Jenis Belanja Utama",
-        jenis_belanja_options,
-        default=jenis_belanja_options,
+        sorted(df["jenis_belanja_utama"].cat.categories),
+        default=list(df["jenis_belanja_utama"].cat.categories),
     )
 
     filtered_df = df[
@@ -177,10 +139,6 @@ def main() -> None:
         & df["tipe_satker"].isin(tipe_satker_filter)
         & df["jenis_belanja_utama"].isin(jenis_belanja_filter)
     ]
-
-    if filtered_df.empty:
-        st.warning("Filter menghasilkan 0 baris. Kurangi atau ubah filter untuk melihat data.")
-        return
 
     st.subheader("Ringkasan Dataset")
     col1, col2, col3, col4 = st.columns(4)
@@ -219,20 +177,21 @@ def main() -> None:
             "Target 95% Tercapai": target_share,
             "Probabilitas Prediksi": pred_share,
         }
-    ).fillna(0)
+    )
     st.bar_chart(chart_df)
 
     if st.checkbox("Tampilkan data mentah yang difilter", value=True):
-        st.dataframe(filtered_df.drop(columns=["target"], errors="ignore"))
+        st.dataframe(filtered_df.drop(columns=["target"]))
 
     st.subheader("Evaluasi Model pada Seluruh Dataset")
     accuracy = (prediction_all == df["target"]).mean()
     st.write(f"Akurasi model terhadap seluruh dataset: **{accuracy * 100:.2f}%**")
 
-    coef_values = getattr(model, "skl_model", model).coef_[0]
+    coef_values = model.skl_model.coef_[0]
+    coef_names = get_model_feature_names(model)
     coef_df = pd.DataFrame(
         {
-            "Fitur": get_model_feature_names(model),
+            "Fitur": coef_names,
             "Koefisien": coef_values,
             "Kekuatan": np.abs(coef_values),
         }
@@ -249,59 +208,17 @@ def main() -> None:
     input_mode = st.radio("Pilih sumber input:", ["Pilih baris data", "Input manual"])
 
     if input_mode == "Pilih baris data":
-        st.write("### Filter Pilih Baris")
-        row_col1, row_col2, row_col3, row_col4 = st.columns(4)
-        provinsi_pred = row_col1.selectbox(
-            "Provinsi untuk filter",
-            ["Semua"] + provinsi_options,
-            index=0,
-        )
-        tipe_pred = row_col2.selectbox(
-            "Tipe Satker untuk filter",
-            ["Semua"] + tipe_options,
-            index=0,
-        )
-        jenis_pred = row_col3.selectbox(
-            "Jenis Belanja untuk filter",
-            ["Semua"] + jenis_belanja_options,
-            index=0,
-        )
-        kementerian_pred = row_col4.text_input("Kementerian untuk filter", "")
-
-        sample_df = filtered_df.copy()
-        if provinsi_pred != "Semua":
-            sample_df = sample_df[sample_df["provinsi"] == provinsi_pred]
-        if tipe_pred != "Semua":
-            sample_df = sample_df[sample_df["tipe_satker"] == tipe_pred]
-        if jenis_pred != "Semua":
-            sample_df = sample_df[sample_df["jenis_belanja_utama"] == jenis_pred]
-        if kementerian_pred.strip():
-            sample_df = sample_df[sample_df["nama_kementerian"].str.contains(kementerian_pred, case=False, na=False)]
-
-        if sample_df.empty:
-            st.warning("Filter prediksi tidak menghasilkan baris. Ubah kriteria filter.")
-            return
-
-        index = st.selectbox(
-            "Pilih baris data:",
-            sample_df.index,
-            format_func=lambda i: f"{i} | {sample_df.loc[i,'nama_kementerian']} | {sample_df.loc[i,'provinsi']} | {sample_df.loc[i,'tipe_satker']}"
-        )
-        sample_row = sample_df.loc[index]
+        index = st.selectbox("Pilih index baris:", filtered_df.index, index=0)
+        sample_row = filtered_df.loc[index]
         st.write("### Data Terpilih")
         st.write(sample_row.to_frame().T)
-        X_sample = build_feature_matrix(sample_row, model)
+        X_sample = build_feature_matrix(sample_row.to_frame(), model)
         pred, prob = predict_from_features(X_sample, model)
     else:
         X_sample, input_data = build_manual_input(model)
         st.write("### Input Manual")
         st.json(input_data)
         pred, prob = predict_from_features(X_sample, model)
-
-    if isinstance(pred, np.ndarray):
-        pred = int(pred[0])
-    if isinstance(prob, np.ndarray):
-        prob = float(prob[0])
 
     st.markdown(
         f"**Hasil Prediksi:** {'Ya' if pred == 1 else 'Tidak'} dengan probabilitas {prob * 100:.2f}%"

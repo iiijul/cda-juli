@@ -73,26 +73,31 @@ def predict_from_features(X: np.ndarray, model) -> tuple[np.ndarray, np.ndarray]
     return prediction, probability
 
 
-def build_manual_input(model) -> tuple[np.ndarray, dict]:
-    """Membuat input manual untuk prediksi interaktif di sidebar."""
-    st.sidebar.subheader("Input Manual untuk Prediksi")
-    jumlah_spm = st.sidebar.number_input(
-        "Jumlah SPM", min_value=0, max_value=1000, value=30, step=1
-    )
-    skor_ikpa = st.sidebar.slider(
-        "Skor IKPA", min_value=0.0, max_value=100.0, value=80.0, step=0.1
-    )
-    revisi_dipa = st.sidebar.number_input(
-        "Revisi DIPA", min_value=0, max_value=20, value=1, step=1
-    )
-    deviasi_rpd_persen = st.sidebar.slider(
-        "Deviasi RPD (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.1
-    )
-    tipe_satker = st.sidebar.selectbox(
-        "Tipe Satker",
-        ["Kantor Pusat", "Kantor Daerah", "Dekonsentrasi", "Tugas Pembantuan"],
-    )
-    kementerian = st.sidebar.text_input("Kementerian", value="Kementan")
+def build_manual_input_features(model) -> tuple[np.ndarray, dict]:
+    """Membuat array fitur dan metadata dari input manual di main section."""
+    st.write("### Input Manual untuk Prediksi")
+    col_in1, col_in2 = st.columns(2)
+    
+    with col_in1:
+        jumlah_spm = st.number_input(
+            "Jumlah SPM", min_value=0, max_value=1000, value=30, step=1
+        )
+        revisi_dipa = st.number_input(
+            "Revisi DIPA", min_value=0, max_value=20, value=1, step=1
+        )
+        deviasi_rpd_persen = st.slider(
+            "Deviasi RPD (%)", min_value=0.0, max_value=100.0, value=20.0, step=0.1
+        )
+    
+    with col_in2:
+        skor_ikpa = st.slider(
+            "Skor IKPA", min_value=0.0, max_value=100.0, value=80.0, step=0.1
+        )
+        tipe_satker = st.selectbox(
+            "Tipe Satker",
+            ["Kantor Pusat", "Kantor Daerah", "Dekonsentrasi", "Tugas Pembantuan"],
+        )
+        kementerian = st.text_input("Kementerian", value="Kementan")
 
     input_data = {
         "jumlah_spm": jumlah_spm,
@@ -188,7 +193,6 @@ def main() -> None:
     col2.metric(
         "Target Tercapai 95%",
         f"{filtered_df['target'].mean() * 100:.1f}%",
-        delta=f"{(filtered_df['target'].mean() - df['target'].mean()) * 100:.1f}% vs total",
     )
     col3.metric("Rata-rata Skor IKPA", f"{filtered_df['skor_ikpa'].mean():.2f}")
     col4.metric("Rata-rata Deviasi RPD", f"{filtered_df['deviasi_rpd_persen'].mean():.2f}%")
@@ -293,9 +297,7 @@ def main() -> None:
         X_sample = build_feature_matrix(sample_row, model)
         pred, prob = predict_from_features(X_sample, model)
     else:
-        X_sample, input_data = build_manual_input(model)
-        st.write("### Input Manual")
-        st.json(input_data)
+        X_sample, input_data = build_manual_input_features(model)
         pred, prob = predict_from_features(X_sample, model)
 
     if isinstance(pred, np.ndarray):
@@ -303,9 +305,25 @@ def main() -> None:
     if isinstance(prob, np.ndarray):
         prob = float(prob[0])
 
-    st.markdown(
-        f"**Hasil Prediksi:** {'Ya' if pred == 1 else 'Tidak'} dengan probabilitas {prob * 100:.2f}%"
-    )
+    st.divider()
+    st.write("## Hasil Prediksi")
+    
+    result_col1, result_col2 = st.columns([2, 3])
+    
+    with result_col1:
+        result_text = "✅ YA" if pred == 1 else "❌ TIDAK"
+        result_color = "green" if pred == 1 else "red"
+        st.markdown(f"### <span style='color:{result_color};font-size:2.5em;'>{result_text}</span>", unsafe_allow_html=True)
+        st.markdown(f"**Target tercapai 95%:** {'Kemungkinan Besar' if pred == 1 else 'Kemungkinan Kecil'}")
+    
+    with result_col2:
+        st.write("### Tingkat Kepercayaan")
+        prob_percentage = prob * 100
+        st.metric(label="Probabilitas Positif", value=f"{prob_percentage:.1f}%")
+        
+        gauge_value = prob_percentage / 100
+        
+        st.progress(gauge_value, text=f"{prob_percentage:.1f}%")
 
     st.markdown(
         "---\n"

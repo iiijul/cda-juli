@@ -153,7 +153,7 @@ def main() -> None:
     prediction_all, probability_all = predict_from_features(X_all, model)
 
     df = df.copy()
-    df["prediksi"] = np.where(prediction_all == 1, "Ya,", "Tidak,")
+    df["prediksi"] = np.where(prediction_all == 1, "Ya", "Tidak")
     df["prediksi_proba"] = probability_all
 
     st.sidebar.header("Filter Data")
